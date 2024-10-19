@@ -25,6 +25,7 @@ import requests
 from PIL import Image
 from io import BytesIO
 import json
+import openai
 
 # Initialize Streamlit app
 st.set_page_config(page_title="SQL Agent Interface", layout="wide")
@@ -34,7 +35,8 @@ st.title("SQL Database Agent Interface")
 load_dotenv()
 
 # Retrieve OpenAI API key from environment
-openai_api_key = os.getenv("OPENAI_API_KEY")
+# openai_api_key = os.getenv("OPENAI_API_KEY")
+openai_api_key = st.secrets["OPENAI_API_KEY"]
 
 if not openai_api_key:
     st.error("OpenAI API key not found. Please set it in your `.env` file.")
