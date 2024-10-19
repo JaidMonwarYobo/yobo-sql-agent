@@ -1,0 +1,10 @@
+langchain
+langchain-community
+langchain-openai
+python-dotenv
+faiss-cpu
+streamlit
+PyMySQL
+Pillow
+requests
+psycopg2-binary
