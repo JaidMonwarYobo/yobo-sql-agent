@@ -8,3 +8,4 @@ PyMySQL
 Pillow
 requests
 psycopg2-binary
+streamlit-chat

@@ -3,6 +3,7 @@ import getpass
 import os
 import time
 from dotenv import load_dotenv
+from streamlit_chat import message
 from sqlalchemy import create_engine, text, inspect
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
@@ -30,6 +31,8 @@ import openai
 # Initialize Streamlit app
 st.set_page_config(page_title="SQL Agent Interface", layout="wide")
 st.title("SQL Database Agent Interface")
+chat_state = False
+conversation_histories = []
 
 # Load environment variables
 load_dotenv()
@@ -77,9 +80,11 @@ def initialize_agent_different_table(db_uri):
     # Initialize example selector
     example_selector = SemanticSimilarityExampleSelector.from_examples(
         examples,
-        OpenAIEmbeddings(),
+        OpenAIEmbeddings(
+            model="text-embedding-3-small"
+        ),
         FAISS,
-        k=5,
+        k=10,
         input_keys=["input"],
     )
 
@@ -113,8 +118,8 @@ def initialize_agent_different_table(db_uri):
     # Define the retriever tool with vector DB
     query_str = f"SELECT {product_name_col} FROM {products_table}"
     product_name_list = query_as_list(db, query_str)
-    vector_db = FAISS.from_texts(product_name_list, OpenAIEmbeddings())
-    retriever = vector_db.as_retriever(search_kwargs={"k": 5})
+    vector_db = FAISS.from_texts(product_name_list, OpenAIEmbeddings(model="text-embedding-3-small"))
+    retriever = vector_db.as_retriever(search_kwargs={"k": 10})
     retriever_tool = create_retriever_tool(
         retriever,
         name="search_proper_nouns",
@@ -248,7 +253,7 @@ def humanise_response(result_list, user_input):
     response_string = json.dumps(result_list, indent=2, default=str)
     
     # Define the system prompt
-    system_prompt = f"The user asked a question: {user_input} and the response was the string below. Humanize the response into a human-readable format."
+    system_prompt = f"The user asked a question: {user_input} and the response was the string below. Humanize the response into a human-readable format. Also ask a question like whether the user wants to know about any other product or any other details of the same product."
     
     # Prepare the messages for ChatOpenAI
     messages = [
@@ -259,6 +264,7 @@ def humanise_response(result_list, user_input):
     # Initialize the ChatOpenAI model
     chat = ChatOpenAI(
         model_name="gpt-4o-mini",  # Replace with "gpt-4" if you have access
+        # model="gpt-3.5-turbo",
         temperature=0.7
     )
     
@@ -292,11 +298,17 @@ if db_type == "SQLite":
     db_file = st.sidebar.text_input("SQLite Database File", value="Chinook.db", key='db_file')
     connect_button = st.sidebar.button("Connect to SQLite Database", key='connect_button_sqlite')
 elif db_type == "MySQL":
-    host = st.sidebar.text_input("Host", value="localhost", key='host')
+    host = st.sidebar.text_input("Host", value="198.12.241.155", key='host')
     port = st.sidebar.text_input("Port", value="3306", key='port')
-    username = st.sidebar.text_input("Username", value="root", key='username')
-    password = st.sidebar.text_input("Password", type="password", value="Admin1234", key='password')
-    database = st.sidebar.text_input("Database Name", value="circle", key='database')
+    username = st.sidebar.text_input("Username", value="inventory_yobo", key='username')
+    password = st.sidebar.text_input("Password", type="password", value="iz-ENVMm{+#[", key='password')
+    database = st.sidebar.text_input("Database Name", value="inventory_yobo", key='database')
+
+    # host = st.sidebar.text_input("Host", value="localhost", key='host')
+    # port = st.sidebar.text_input("Port", value="3306", key='port')
+    # username = st.sidebar.text_input("Username", value="root", key='username')
+    # password = st.sidebar.text_input("Password", type="password", value="Admin1234", key='password')
+    # database = st.sidebar.text_input("Database Name", value="circle", key='database')
     connect_button = st.sidebar.button("Connect to MySQL Database", key='connect_button_mysql')
 elif db_type == "PostgreSQL":
     host = st.sidebar.text_input("Host", value="localhost", key='host')
@@ -313,16 +325,20 @@ if connect_button:
             st.sidebar.error("Please provide the SQLite database file path.")
             st.stop()
         db_uri = f"sqlite:///{db_file}"
+        chat_state = False
     elif db_type == "MySQL":
         if not all([host, port, username, password, database]):
             st.sidebar.error("Please fill in all the database credentials.")
             st.stop()
         db_uri = f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}"
+        chat_state = False
+        print("Chat state:", chat_state)
     elif db_type == "PostgreSQL":
         if not all([host, port, username, password, database]):
             st.sidebar.error("Please fill in all the database credentials.")
             st.stop()
         db_uri = f"postgresql://{username}:{password}@{host}:{port}/{database}"
+        chat_state = False
     
     try:
         if image_location == "Multi Table Architecture":
@@ -402,6 +418,15 @@ else:
     st.warning("Please initialize the agent in the sidebar.")
     st.stop()
 
+if 'chat_display' not in st.session_state:
+    st.session_state['chat_display'] = []
+
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
+
+if 'final_output' not in st.session_state:
+    st.session_state.final_output = None
+
 # Sidebar Information
 st.sidebar.header("Database Information")
 st.sidebar.write(f"**Dialect:** {db_dialect}")
@@ -411,21 +436,49 @@ st.sidebar.write(f"**Tables:** {', '.join(table_names)}")
 st.header("Enter Your Query")
 user_input = st.text_input("Type your SQL-related question here:", "")
 
+
+def new_product(conversation_history, user_input):
+    system_prompt = f"""
+    You are an assistant that determines if the user's new question is about a different product than previously discussed.
+    Conversation history: {conversation_history}
+    If the user's new question is about the same product as in the conversation history, respond with 'no'.
+    If it is about a different product, or if it is a general statement (e.g., greetings, thanks, bye), respond with 'yes'.
+    Provide only 'yes' or 'no' as your response.
+    """
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_input)
+    ]
+
+    deciding_agent = ChatOpenAI(
+        model="gpt-4o-mini",
+        # model="gpt-3.5-turbo",
+        temperature=0,
+        max_tokens=3,
+        api_key=openai_api_key
+    )
+    assistant_reply = deciding_agent(messages).content.strip()
+    return assistant_reply
+
+
 if st.button("Submit"):
+    # chat_state = 2
+    print("Chat state:", chat_state)
+    # print("Conversation History:", conversation_histories)
+    new_product_decider = new_product(st.session_state.conversation_history, user_input)
+    print("New Product Decider:", new_product_decider)
     if user_input.strip() == "":
         st.warning("Please enter a valid query.")
     else:
         with st.spinner("Processing your query..."):
             try:
-                start_time = time.perf_counter()
-                response = agent.invoke({"input": user_input})
-                end_time = time.perf_counter()
-                elapsed_time_ms = (end_time - start_time) * 1000
-
-                st.success("Query executed successfully!")
-                st.subheader("Response:")
-
                 if image_location == "Single Table Architecture":
+                    start_time = time.perf_counter()
+                    response = agent.invoke({"input": user_input})
+
+                    st.success("Query executed successfully!")
+                    st.subheader("Response:")
                     if isinstance(response, dict) and "output" in response:
                         output = response["output"]
                     else:
@@ -447,31 +500,133 @@ if st.button("Submit"):
                         else:
                             st.write(line)
                 elif image_location == "Multi Table Architecture":
-                    # Check if the response contains the expected output format
-                    if isinstance(response, dict) and "output" in response:
-                        output = response["output"]
-                    else:
-                        output = str(response)
+                    start_time = time.perf_counter()
+                    
+                    # if chat_state == False:
+                    if new_product_decider == "yes":
+                        # Check if the response contains the expected output format
+                        response = agent.invoke({"input": user_input})
 
-                    # Display only the name
-                    final_output = response_after_executing_sql_query(output)
-                    st.write(f"Retrieved Name: {output}")
-                    natural_output = humanise_response(final_output, user_input)
+                        st.success("Query executed successfully!")
+                        st.subheader("Response:")
 
-                    # Display the query results
-                    if natural_output:
-                        st.write("Query Results:")
-                        # st.dataframe(final_output)
-                        st.write(f"Retrieved Name: {natural_output}")
-                    else:
-                        st.write("No results found for the given product name.")
+                        end_time_name = time.perf_counter()
+                        elapsed_time_name_ms = (end_time_name - start_time) * 1000
+
+                        if isinstance(response, dict) and "output" in response:
+                            output = response["output"]
+                        else:
+                            output = str(response)
+
+                        # Display only the name
+                        final_output = response_after_executing_sql_query(output)
+                        st.session_state.final_output = final_output # Save the final output in session state
+                        st.write(f"Retrieved Name: {output}")
+                        natural_output = humanise_response(final_output, user_input)
+
+                        # Display the query results
+                        if natural_output:
+                            st.write("Query Results:")
+                            # st.dataframe(final_output)
+                            st.write(f"Retrieved Name: {natural_output}")
+                        else:
+                            st.write("No results found for the given product name.")
+
+                        end_formatting_time = time.perf_counter()
+                        elapsed_time_formatting_ms = (end_formatting_time - end_time_name) * 1000
+                        
+                        
+                        # Debug Chat State
+                        conversation_pair = {
+                            "user_message": user_input,
+                            "assistant_response": natural_output
+                        }
+                        # conversation_histories.append(conversation_pair)
+                        # print("Conversation History:", conversation_histories)
+
+                        st.session_state.conversation_history.append(conversation_pair)
+                        print("Conversation History:", st.session_state.conversation_history)
+
+                        st.session_state.chat_display.append({"message": user_input, "is_user": True})
+                        st.session_state.chat_display.append({"message": natural_output, "is_user": False})
+
+                        for i, chat in enumerate(st.session_state.chat_display):
+                            message(
+                                chat["message"],
+                                is_user=chat["is_user"],
+                                key=str(i)
+                            )
+
+                        chat_state = True
+                        print("Chat state:", chat_state)
+                    if new_product_decider == "no":
+                        final_output = st.session_state.final_output
+                        natural_output = humanise_response(final_output, user_input)
+
+                        elapsed_time_name_ms = 0
+                        end_formatting_time = time.perf_counter()
+                        elapsed_time_formatting_ms = (end_formatting_time - start_time) * 1000
+                        
+                        conversation_pair = {
+                            "user_message": user_input,
+                            "assistant_response": natural_output
+                        }
+
+                        st.session_state.conversation_history.append(conversation_pair)
+                        print("Conversation History:", st.session_state.conversation_history)
+
+                        st.session_state.chat_display.append({"message": user_input, "is_user": True})
+                        st.session_state.chat_display.append({"message": natural_output, "is_user": False})
+
+                        for i, chat in enumerate(st.session_state.chat_display):
+                            message(
+                                chat["message"],
+                                is_user=chat["is_user"],
+                                key=str(i)
+                            )
+
+                        chat_state = True
+                        print("Chat state:", chat_state)
+
+
+
+
+                    # # Check if the response contains the expected output format
+                    # if isinstance(response, dict) and "output" in response:
+                    #     output = response["output"]
+                    # else:
+                    #     output = str(response)
+
+                    # # Display only the name
+                    # final_output = response_after_executing_sql_query(output)
+                    # st.write(f"Retrieved Name: {output}")
+                    # natural_output = humanise_response(final_output, user_input)
+
+                    # # Display the query results
+                    # if natural_output:
+                    #     st.write("Query Results:")
+                    #     # st.dataframe(final_output)
+                    #     st.write(f"Retrieved Name: {natural_output}")
+                    # else:
+                    #     st.write("No results found for the given product name.")
+
+                    end_time = time.perf_counter()
+                    elapsed_time_ms = (end_time - start_time) * 1000
                 
                 
 
-                st.info(f"Time taken: {elapsed_time_ms:.2f} ms")
+                
+                st.info(f"Time taken for Finding Name: {elapsed_time_name_ms:.2f} ms")
+                st.info(f"Time taken for Executing Query and Formatting Query: {elapsed_time_formatting_ms:.2f} ms")
+                st.info(f"Time taken for Overall Query: {elapsed_time_ms:.2f} ms")
 
             except Exception as e:
                 st.error(f"An error occurred: {e}")
+
+if st.sidebar.button("Clear Chat"):
+    st.session_state.chat_display = []
+    st.session_state.conversation_history = []
+    st.session_state.final_output = None
 
 # Agent Logs (Optional)
 st.markdown("---")
