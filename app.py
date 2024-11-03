@@ -52,19 +52,14 @@ def query_as_list(db, query):
     res = [re.sub(r"\b\d+\b", "", string).strip() for string in res]
     return list(set(res))
 
-# Function to initialize the agent for "Multi Table Architecture"
+# Function to initialize the agent for "Product Query Agent"
 @st.cache_resource
-def initialize_agent_different_table(db_uri):
+def initialize_agent_different_table(db_uri, main_table_selection, product_name_col, 
+                                     secondary_table_selection, thumb_pic_col, 
+                                     supplier_product_id_col):
     # Initialize the database
     db = SQLDatabase.from_uri(db_uri)
     
-    # Get variables from session state
-    product_name_col = st.session_state['product_name_col']
-    products_table = st.session_state['products_table']
-    thumb_pic_col = st.session_state['thumb_pic_col']
-    products_images_table = st.session_state.get('products_images_table', None)
-    supplier_product_id_col = st.session_state.get('supplier_product_id_col', None)
-
     # Initialize the language model
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=openai_api_key)
 
@@ -81,19 +76,19 @@ def initialize_agent_different_table(db_uri):
     example_selector = SemanticSimilarityExampleSelector.from_examples(
         examples,
         OpenAIEmbeddings(
-            model="text-embedding-3-small"
+            model="text-embedding-ada-002"
         ),
         FAISS,
         k=10,
         input_keys=["input"],
     )
 
-     # **Modified System Prompt**
+    # **Modified System Prompt**
     system_prefix = """You are an agent designed to find and output proper names from a vector database.
-    When given an input, you must return only the proper name found in the vector database.
-    Do not perform any SQL operations or generate any SQL queries.
-    Do not provide any additional analysis, commentary, or other information.
-    Only return the name from the vector database."""
+When given an input, you must return only the proper name found in the vector database.
+Do not perform any SQL operations or generate any SQL queries.
+Do not provide any additional analysis, commentary, or other information.
+Only return the name from the vector database."""
 
     # Create a simple retriever-only prompt
     few_shot_prompt = FewShotPromptTemplate(
@@ -116,9 +111,9 @@ def initialize_agent_different_table(db_uri):
     )
 
     # Define the retriever tool with vector DB
-    query_str = f"SELECT {product_name_col} FROM {products_table}"
+    query_str = f"SELECT {product_name_col} FROM {main_table_selection}"
     product_name_list = query_as_list(db, query_str)
-    vector_db = FAISS.from_texts(product_name_list, OpenAIEmbeddings(model="text-embedding-3-small"))
+    vector_db = FAISS.from_texts(product_name_list, OpenAIEmbeddings(model="text-embedding-ada-002"))
     retriever = vector_db.as_retriever(search_kwargs={"k": 10})
     retriever_tool = create_retriever_tool(
         retriever,
@@ -138,7 +133,7 @@ def initialize_agent_different_table(db_uri):
 
     return agent, db, str(db.dialect), db.get_usable_table_names()
 
-# Function to initialize the agent for "Single Table Architecture"
+# Function to initialize the agent for "Universal Agent"
 def initialize_agent_same_table(db_uri, selected_columns):
     # Initialize the database
     db = SQLDatabase.from_uri(db_uri)
@@ -167,9 +162,9 @@ def initialize_agent_same_table(db_uri, selected_columns):
 
     # Create the SQL agent
     system = f"""You are an agent designed to interact with a SQL database.
-    Given an input question, create a syntactically correct {db_dialect} query to run, then look at the results of the query and return the answer.
-    You have access to the following tables: {table_names}.
-    """
+Given an input question, create a syntactically correct {db_dialect} query to run, then look at the results of the query and return the answer.
+You have access to the following tables: {table_names}.
+"""
 
     prompt = ChatPromptTemplate.from_messages(
         [("system", system), ("human", "{input}"), MessagesPlaceholder("agent_scratchpad")]
@@ -211,23 +206,23 @@ def response_after_executing_sql_query(product_name):
     # Get variables from session state
     product_name_col = st.session_state['product_name_col']
     thumb_pic_col = st.session_state['thumb_pic_col']
-    products_table = st.session_state['products_table']
-    products_images_table = st.session_state.get('products_images_table', None)
+    main_table_selection = st.session_state['main_table_selection']
+    secondary_table_selection = st.session_state.get('secondary_table_selection', None)
     supplier_product_id_col = st.session_state.get('supplier_product_id_col', None)
     image_location = st.session_state['image_location']
 
     # Build the SQL query dynamically depending on image_location
-    if image_location == "Single Table Architecture":
+    if image_location == "Universal Agent":
         query_str = f'''
             SELECT *
-            FROM {products_table}
+            FROM {main_table_selection}
             WHERE {product_name_col} LIKE :product_name;
         '''
     else:
         query_str = f'''
             SELECT pos.*, pis.{thumb_pic_col}
-            FROM {products_table} pos
-            LEFT JOIN {products_images_table} pis
+            FROM {main_table_selection} pos
+            LEFT JOIN {secondary_table_selection} pis
             ON pos.{supplier_product_id_col} = pis.{supplier_product_id_col}
             WHERE pos.{product_name_col} LIKE :product_name;
         '''
@@ -237,7 +232,7 @@ def response_after_executing_sql_query(product_name):
 
     # Prepare the parameter with wildcards
     params = {'product_name': f'%{product_name}%'}
-    
+
     # Execute the query
     with engine.connect() as connection:
         result = connection.execute(query, params)
@@ -253,7 +248,7 @@ def humanise_response(result_list, user_input):
     response_string = json.dumps(result_list, indent=2, default=str)
     
     # Define the system prompt
-    system_prompt = f"The user asked a question: {user_input} and the response was the string below. Humanize the response into a human-readable format. Also ask a question like whether the user wants to know about any other product or any other details of the same product."
+    system_prompt = f"The user asked a question: {user_input} and the response was the string below. Humanize the response into a conversation format. Also ask a question like whether the user wants to know about any other product or any other details of the same product."
     
     # Prepare the messages for ChatOpenAI
     messages = [
@@ -263,7 +258,7 @@ def humanise_response(result_list, user_input):
     
     # Initialize the ChatOpenAI model
     chat = ChatOpenAI(
-        model_name="gpt-4o-mini",  # Replace with "gpt-4" if you have access
+        model_name="gpt-4o-mini",  # Corrected model name
         # model="gpt-3.5-turbo",
         temperature=0.7
     )
@@ -272,25 +267,59 @@ def humanise_response(result_list, user_input):
     assistant_reply = chat(messages).content
     return assistant_reply
 
-# Sidebar for selecting image location
-st.sidebar.header("Any Additional table information with Main Table")
-image_location = st.sidebar.selectbox("Agent Type", ["Single Table Architecture", "Multi Table Architecture"], key='image_location')
+def humanise_product_response_with_context(result_list, user_input, conversation_history):
+    # Convert the result_list to a JSON string with indentation for readability
+    response_string = json.dumps(result_list, indent=2, default=str)
+    
+    # Define the system prompt
+    system_prompt = f"The user asked a question: {user_input} and the response was the string below for the conversation context as: {conversation_history}. Humanize the response into a conversation format. Also ask a question like whether the user wants to know about any other product or any other details of the same product."
+    
+    # Prepare the messages for ChatOpenAI
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=response_string)
+    ]
+    
+    # Initialize the ChatOpenAI model
+    chat = ChatOpenAI(
+        model_name="gpt-4o-mini",  # Corrected model name
+        # model="gpt-3.5-turbo",
+        temperature=0.7
+    )
+    
+    # Get the assistant's reply
+    assistant_reply = chat(messages).content
+    return assistant_reply
 
-# Sidebar input fields for "Multi Table Architecture"
-if image_location == "Multi Table Architecture":
-    st.sidebar.header("Schema Configuration")
-    product_name_col = st.sidebar.text_input("Exact Column Name for Product Name Column (Column which contains proper noun of products/users/companies)", value="wp_title", key='product_name_col')
-    thumb_pic_col = st.sidebar.text_input("Exact Column Name for Additional Info Column", value="variation_name", key='thumb_pic_col')
-    products_table = st.sidebar.text_input("Exact Table Name for the Main Table", value="wp_data", key='products_table')
-    products_images_table = st.sidebar.text_input("Exact Table Name for Additional Info Column", value="variations_data", key='products_images_table')
-    supplier_product_id_col = st.sidebar.text_input("Exact Column Name for Foreign ID (column name which is on the Additional Info Table)", value="wp_id", key='supplier_product_id_col')
-    # product_name_col = st.sidebar.text_input("Product Name Column", value="product_name", key='product_name_col')
-    # thumb_pic_col = st.sidebar.text_input("Thumbnail Picture Column", value="thumb_pic", key='thumb_pic_col')
-    # products_table = st.sidebar.text_input("Products Table Name", value="products_of_suppliers", key='products_table')
-    # products_images_table = st.sidebar.text_input("Product Images Table Name", value="products_images_of_suppliers", key='products_images_table')
-    # supplier_product_id_col = st.sidebar.text_input("Product ID Mapping Column", value="supplier_product_id", key='supplier_product_id_col')
+def humanise_response_with_context(result_list, user_input, conversation_history):
+    # Convert the result_list to a JSON string with indentation for readability
+    response_string = json.dumps(result_list, indent=2, default=str)
+    
+    # Define the system prompt
+    system_prompt = f"The user asked a question: {user_input} and the response was the string below for the conversation context as: {conversation_history}. Humanize the response into a conversation format. Also ask a question whether the user wants to know about any more information that suits the conversation flow."
+    
+    # Prepare the messages for ChatOpenAI
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=response_string)
+    ]
+    
+    # Initialize the ChatOpenAI model
+    chat = ChatOpenAI(
+        model_name="gpt-4o-mini",  # Corrected model name
+        # model="gpt-3.5-turbo",
+        temperature=0.7
+    )
+    
+    # Get the assistant's reply
+    assistant_reply = chat(messages).content
+    return assistant_reply
 
-# Database connection settings
+# Sidebar: Setup Agent (Placed After Database Credentials)
+st.sidebar.header("Setup Agent")
+image_location = st.sidebar.selectbox("Agent Type", ["Universal Agent", "Product Query Agent"], key='image_location')
+
+# Sidebar: Database Credentials (Placed First)
 st.sidebar.header("Database Credentials")
 db_type = st.sidebar.selectbox("Database Type", ["SQLite", "MySQL", "PostgreSQL"], key='db_type')
 
@@ -301,20 +330,14 @@ elif db_type == "MySQL":
     host = st.sidebar.text_input("Host", value="198.12.241.155", key='host')
     port = st.sidebar.text_input("Port", value="3306", key='port')
     username = st.sidebar.text_input("Username", value="inventory_yobo", key='username')
-    password = st.sidebar.text_input("Password", type="password", value="iz-ENVMm{+#[", key='password')
+    password = st.sidebar.text_input("Password", type="password", value="", key='password')  # Removed default value
     database = st.sidebar.text_input("Database Name", value="inventory_yobo", key='database')
-
-    # host = st.sidebar.text_input("Host", value="localhost", key='host')
-    # port = st.sidebar.text_input("Port", value="3306", key='port')
-    # username = st.sidebar.text_input("Username", value="root", key='username')
-    # password = st.sidebar.text_input("Password", type="password", value="Admin1234", key='password')
-    # database = st.sidebar.text_input("Database Name", value="circle", key='database')
     connect_button = st.sidebar.button("Connect to MySQL Database", key='connect_button_mysql')
 elif db_type == "PostgreSQL":
     host = st.sidebar.text_input("Host", value="localhost", key='host')
     port = st.sidebar.text_input("Port", value="5432", key='port')
     username = st.sidebar.text_input("Username", value="postgres", key='username')
-    password = st.sidebar.text_input("Password", value="admin1234", type="password", key='password')
+    password = st.sidebar.text_input("Password", value="", type="password", key='password')  # Removed default value
     database = st.sidebar.text_input("Database Name", value="contactapi", key='database')
     connect_button = st.sidebar.button("Connect to PostgreSQL Database", key='connect_button_postgres')
 
@@ -325,40 +348,146 @@ if connect_button:
             st.sidebar.error("Please provide the SQLite database file path.")
             st.stop()
         db_uri = f"sqlite:///{db_file}"
-        chat_state = False
     elif db_type == "MySQL":
         if not all([host, port, username, password, database]):
             st.sidebar.error("Please fill in all the database credentials.")
             st.stop()
         db_uri = f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}"
-        chat_state = False
-        print("Chat state:", chat_state)
     elif db_type == "PostgreSQL":
         if not all([host, port, username, password, database]):
             st.sidebar.error("Please fill in all the database credentials.")
             st.stop()
         db_uri = f"postgresql://{username}:{password}@{host}:{port}/{database}"
-        chat_state = False
-    
+
     try:
-        if image_location == "Multi Table Architecture":
-            st.session_state['db_uri'] = db_uri
-            agent, db, db_dialect, table_names = initialize_agent_different_table(db_uri)
-            st.session_state['agent'] = agent
-            st.session_state['db'] = db
-            st.session_state['db_dialect'] = db_dialect
-            st.session_state['table_names'] = table_names
-        else:
-            db = SQLDatabase.from_uri(db_uri)
-            db_dialect = db.dialect
-            table_names = db.get_usable_table_names()
-            st.session_state['db'] = db
-            st.session_state['db_uri'] = db_uri
-            st.session_state['db_dialect'] = db_dialect
-            st.session_state['table_names'] = table_names
-            st.success(f"Connected to the {db_type} database successfully!")
+        db = SQLDatabase.from_uri(db_uri)
+        db_dialect = db.dialect
+        table_names = db.get_usable_table_names()
+        st.session_state['db'] = db
+        st.session_state['db_uri'] = db_uri
+        st.session_state['db_dialect'] = db_dialect
+        st.session_state['table_names'] = table_names
+
+        # Retrieve columns for each table
+        inspector = inspect(db._engine)
+        table_columns = {}
+        for table in table_names:
+            columns = inspector.get_columns(table)
+            table_columns[table] = [column['name'] for column in columns]
+        st.session_state['table_columns'] = table_columns
+
+        st.success(f"Connected to the {db_type} database successfully!")
+
+        # Automatically populate the main_table_selection if not already selected
+        if 'image_location' in st.session_state and st.session_state['image_location'] == "Product Query Agent" and 'main_table_selection' not in st.session_state:
+            st.session_state['main_table_selection'] = table_names[0] if table_names else None
+
     except Exception as e:
         st.sidebar.error(f"Failed to connect to the database: {e}")
+        st.stop()
+
+
+# Sidebar: Schema Configuration (Only for "Product Query Agent" and after Database Connection)
+if image_location == "Product Query Agent":
+    st.sidebar.header("Schema Configuration")
+    
+    # Ensure that table_names are available
+    if 'table_names' in st.session_state and st.session_state['table_names']:
+        table_names = st.session_state['table_names']
+        
+        # Main Table Selection
+        main_table = st.sidebar.selectbox(
+            "Select Primary Table where product information is located",
+            options=table_names,
+            key='main_table_selection'
+        )
+        
+        # Product Name Column Selection
+        if 'table_columns' in st.session_state and main_table in st.session_state['table_columns']:
+            main_table_columns = st.session_state['table_columns'][main_table]
+            if main_table_columns:
+                product_name_col = st.sidebar.selectbox(
+                    "Select Product Name Column",
+                    options=main_table_columns,
+                    key='product_name_col'
+                )
+            else:
+                st.sidebar.warning("No columns found for the selected main table.")
+                st.stop()
+        else:
+            st.sidebar.warning("No columns found for the selected main table.")
+            st.stop()
+        
+        # Secondary Table Selection (excluding the main table)
+        secondary_tables = [tbl for tbl in table_names if tbl != main_table]
+        if secondary_tables:
+            secondary_table = st.sidebar.selectbox(
+                "Select Secondary Table (for Images)",
+                options=secondary_tables,
+                key='secondary_table_selection'
+            )
+        else:
+            st.sidebar.warning("No secondary tables available to select.")
+            st.stop()
+        
+        # Thumb Pic Column Selection
+        if 'table_columns' in st.session_state and secondary_table in st.session_state['table_columns']:
+            secondary_table_columns = st.session_state['table_columns'][secondary_table]
+            if secondary_table_columns:
+                thumb_pic_col = st.sidebar.selectbox(
+                    "Select Thumbnail Picture Column",
+                    options=secondary_table_columns,
+                    key='thumb_pic_col'
+                )
+            else:
+                st.sidebar.warning("No columns found for the selected secondary table.")
+                st.stop()
+        else:
+            st.sidebar.warning("No columns found for the selected secondary table.")
+            st.stop()
+        
+        # Supplier Product ID Column Selection
+        if 'table_columns' in st.session_state and secondary_table in st.session_state['table_columns']:
+            supplier_product_id_col = st.sidebar.selectbox(
+                "Select Foreign Key Column (to join tables)",
+                options=secondary_table_columns,
+                key='supplier_product_id_col'
+            )
+        else:
+            st.sidebar.warning("No columns found for the selected secondary table.")
+            st.stop()
+        
+        # Button to initialize the agent
+        if st.sidebar.button("Initialize Agent"):
+            try:
+                # Get selections from widgets
+                main_table = st.session_state['main_table_selection']
+                product_name_col = st.session_state['product_name_col']
+                secondary_table = st.session_state['secondary_table_selection']
+                thumb_pic_col = st.session_state['thumb_pic_col']
+                supplier_product_id_col = st.session_state['supplier_product_id_col']
+                
+                # Initialize the agent with the selected parameters
+                agent, db, db_dialect, table_names_updated = initialize_agent_different_table(
+                    st.session_state['db_uri'],
+                    main_table,
+                    product_name_col,
+                    secondary_table,
+                    thumb_pic_col,
+                    supplier_product_id_col
+                )
+                
+                # Assign to session_state
+                st.session_state['agent'] = agent
+                st.session_state['db'] = db
+                st.session_state['db_dialect'] = db_dialect
+                st.session_state['table_names'] = table_names_updated
+                st.success("Product Query Agent initialized successfully!")
+            except Exception as e:
+                st.sidebar.error(f"Failed to initialize the agent: {e}")
+                st.stop()
+    else:
+        st.sidebar.warning("Please connect to a database first.")
         st.stop()
 
 # Ensure the database is connected
@@ -380,9 +509,11 @@ if 'db' in st.session_state:
         columns = get_column_names(db, table)
         table_columns[table] = columns
 
-    # Sidebar for selecting columns (only for "Single Table Architecture")
-    if image_location == "Single Table Architecture":
-        st.sidebar.header("Select Column which has Proper Nouns (specifically Product Names)")
+    st.session_state['table_columns'] = table_columns
+
+    # Sidebar for selecting columns (only for "Universal Agent")
+    if image_location == "Universal Agent":
+        st.sidebar.header("Select Column with Proper Nouns (such as usernames, product names, etc.). Choose only ONE column in total.")
         selected_columns = {}
         for table in table_names:
             with st.sidebar.expander(f"Select columns from {table}"):
@@ -439,12 +570,12 @@ user_input = st.text_input("Type your SQL-related question here:", "")
 
 def new_product(conversation_history, user_input):
     system_prompt = f"""
-    You are an assistant that determines if the user's new question is about a different product than previously discussed.
-    Conversation history: {conversation_history}
-    If the user's new question is about the same product as in the conversation history, respond with 'no'.
-    If it is about a different product, or if it is a general statement (e.g., greetings, thanks, bye), respond with 'yes'.
-    Provide only 'yes' or 'no' as your response.
-    """
+You are an assistant that determines if the user's new question is about a different product than previously discussed.
+Conversation history: {conversation_history}
+If the user's new question is about the same product as in the conversation history, respond with 'no'.
+If it is about a different product, or if it is a general statement (e.g., greetings, thanks, bye), respond with 'yes'.
+Provide only 'yes' or 'no' as your response.
+"""
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -452,7 +583,7 @@ def new_product(conversation_history, user_input):
     ]
 
     deciding_agent = ChatOpenAI(
-        model="gpt-4o-mini",
+        model="gpt-4o-mini",  # Corrected model name
         # model="gpt-3.5-turbo",
         temperature=0,
         max_tokens=3,
@@ -473,9 +604,9 @@ if st.button("Submit"):
     else:
         with st.spinner("Processing your query..."):
             try:
-                if image_location == "Single Table Architecture":
+                if image_location == "Universal Agent":
                     start_time = time.perf_counter()
-                    response = agent.invoke({"input": user_input})
+                    response = agent.invoke({"input": user_input+" and the previous context of the conversation is as follows: "+str(st.session_state.conversation_history)})
 
                     st.success("Query executed successfully!")
                     st.subheader("Response:")
@@ -483,6 +614,30 @@ if st.button("Submit"):
                         output = response["output"]
                     else:
                         output = str(response)
+
+                    end_time = time.perf_counter()
+                    elapsed_time_ms = (end_time - start_time) * 1000
+                    
+                    conversation_pair = {
+                        "user_message": user_input,
+                        "assistant_response": output
+                    }
+
+                    st.session_state.conversation_history.append(conversation_pair)
+                    print("Conversation History:", st.session_state.conversation_history)
+
+                    st.session_state.chat_display.append({"message": user_input, "is_user": True})
+                    st.session_state.chat_display.append({"message": output, "is_user": False})
+
+                    for i, chat in enumerate(st.session_state.chat_display):
+                        message(
+                            chat["message"],
+                            is_user=chat["is_user"],
+                            key=str(i)
+                        )
+
+                    chat_state = True
+                    print("Chat state:", chat_state)
 
                     # Process the response line by line
                     lines = output.split('\n')
@@ -499,11 +654,12 @@ if st.button("Submit"):
                             st.write(line)
                         else:
                             st.write(line)
-                elif image_location == "Multi Table Architecture":
+
+                    st.info(f"Total Response Time: {elapsed_time_ms:.2f} ms")
+                elif image_location == "Product Query Agent":
                     start_time = time.perf_counter()
                     
-                    # if chat_state == False:
-                    if new_product_decider == "yes":
+                    if new_product_decider.lower() == "yes":
                         # Check if the response contains the expected output format
                         response = agent.invoke({"input": user_input})
 
@@ -559,9 +715,9 @@ if st.button("Submit"):
 
                         chat_state = True
                         print("Chat state:", chat_state)
-                    if new_product_decider == "no":
+                    elif new_product_decider.lower() == "no":
                         final_output = st.session_state.final_output
-                        natural_output = humanise_response(final_output, user_input)
+                        natural_output = humanise_product_response_with_context(final_output, user_input, st.session_state.conversation_history)
 
                         elapsed_time_name_ms = 0
                         end_formatting_time = time.perf_counter()
@@ -588,37 +744,12 @@ if st.button("Submit"):
                         chat_state = True
                         print("Chat state:", chat_state)
 
-
-
-
-                    # # Check if the response contains the expected output format
-                    # if isinstance(response, dict) and "output" in response:
-                    #     output = response["output"]
-                    # else:
-                    #     output = str(response)
-
-                    # # Display only the name
-                    # final_output = response_after_executing_sql_query(output)
-                    # st.write(f"Retrieved Name: {output}")
-                    # natural_output = humanise_response(final_output, user_input)
-
-                    # # Display the query results
-                    # if natural_output:
-                    #     st.write("Query Results:")
-                    #     # st.dataframe(final_output)
-                    #     st.write(f"Retrieved Name: {natural_output}")
-                    # else:
-                    #     st.write("No results found for the given product name.")
-
                     end_time = time.perf_counter()
                     elapsed_time_ms = (end_time - start_time) * 1000
-                
-                
 
-                
-                st.info(f"Time taken for Finding Name: {elapsed_time_name_ms:.2f} ms")
-                st.info(f"Time taken for Executing Query and Formatting Query: {elapsed_time_formatting_ms:.2f} ms")
-                st.info(f"Time taken for Overall Query: {elapsed_time_ms:.2f} ms")
+                    st.info(f"Time taken for Finding Name (t_1): {elapsed_time_name_ms:.2f} ms")
+                    st.info(f"Time taken for Executing Query and Formatting Query (t_2): {elapsed_time_formatting_ms:.2f} ms")
+                    st.info(f"Total Response Time (t_1 + t_2): {elapsed_time_ms:.2f} ms")
 
             except Exception as e:
                 st.error(f"An error occurred: {e}")
