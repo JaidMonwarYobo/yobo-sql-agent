@@ -517,7 +517,7 @@ if image_location == "Product Query Agent":
             st.session_state["primary_foreign_keys"].append(None)
             st.session_state["secondary_foreign_keys"].append(None)
 
-        if st.sidebar.button("Add Another Attribute"):
+        if st.sidebar.button("Add Additional Attribute"):
             add_secondary_table()
 
         for i in range(len(st.session_state["secondary_tables"])):
