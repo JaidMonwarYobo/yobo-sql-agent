@@ -847,7 +847,9 @@ if st.button("Submit"):
                             {"message": natural_output, "is_user": False}
                         )
 
+                        st.markdown("---")
                         st.subheader("Conversation History")
+                        st.markdown("---")
                         for i, chat in enumerate(st.session_state.chat_display):
                             message(
                                 chat["message"], is_user=chat["is_user"], key=str(i)
@@ -889,8 +891,9 @@ if st.button("Submit"):
                             {"message": natural_output, "is_user": False}
                         )
 
+                        st.markdown("---")
                         st.subheader("Conversation History")
-
+                        st.markdown("---")
                         for i, chat in enumerate(st.session_state.chat_display):
                             message(
                                 chat["message"], is_user=chat["is_user"], key=str(i)
