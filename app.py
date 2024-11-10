@@ -567,6 +567,8 @@ if image_location == "Product Query Agent":
                 i
             ] = secondary_table_foreign_key_col
 
+            st.markdown("---")
+
         # # Add button for new secondary table
         # if st.sidebar.button("Add Another Secondary Table"):
         #     add_secondary_table()
