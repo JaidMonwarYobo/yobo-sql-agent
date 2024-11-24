@@ -4,9 +4,11 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from io import BytesIO
 
 import openai
+import pymysql
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -25,7 +27,7 @@ from langchain_core.prompts import (
 )
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from PIL import Image
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, pool, text
 from streamlit_chat import message
 
 # Initialize Streamlit app
@@ -268,7 +270,26 @@ def response_after_executing_sql_query(product_name):
             base_query += f" LEFT JOIN {config['secondary_tables'][i]} ON {config['primary_table']}.{config['primary_foreign_keys'][i]} = {config['secondary_tables'][i]}.{config['secondary_foreign_keys'][i]}"
 
         # Add WHERE clause based on user input
-        where_clause = f" WHERE LOWER({config['primary_table']}.{config['product_name_col']}) LIKE LOWER('%{product_name}%')"
+        # where_clause = f" WHERE LOWER({config['primary_table']}.{config['product_name_col']}) LIKE LOWER('%{product_name}%')"
+        where_conditions = [
+            f"LOWER({config['primary_table']}.{config['product_name_col']}) LIKE LOWER('%{product_name}%')"
+        ]
+
+        # Add conditions for each search column
+        if "search_columns" in st.session_state:
+            for search_col in st.session_state["search_columns"]:
+                if search_col:  # Only add condition if search_col is not None
+                    where_conditions.append(
+                        f"LOWER({config['primary_table']}.{search_col}) LIKE LOWER('%{product_name}%')"
+                    )
+
+        # Add conditions for each additional column
+        for i, additional_col in enumerate(config["additional_info_columns"]):
+            where_conditions.append(
+                f"LOWER({config['secondary_tables'][i]}.{additional_col}) LIKE LOWER('%{product_name}%')"
+            )
+        # Combine conditions with OR
+        where_clause = " WHERE " + " OR ".join(where_conditions)
 
         query_str = base_query + where_clause
 
@@ -373,6 +394,7 @@ image_location = st.sidebar.selectbox(
 )
 
 # Sidebar: Database Credentials (Placed First)
+st.sidebar.markdown("---")
 st.sidebar.header("DATABASE CREDENTIALS")
 db_type = st.sidebar.selectbox(
     "Database Type", ["SQLite", "MySQL", "PostgreSQL"], key="db_type"
@@ -390,7 +412,7 @@ elif db_type == "MySQL":
     port = st.sidebar.text_input("Port", value="3306", key="port")
     username = st.sidebar.text_input("Username", value="inventory_yobo", key="username")
     password = st.sidebar.text_input(
-        "Password", type="password", value="", key="password"
+        "Password", type="password", value="iz-ENVMm{+#[", key="password"
     )
     database = st.sidebar.text_input(
         "Database Name", value="inventory_yobo", key="database"
@@ -463,7 +485,7 @@ if connect_button:
         st.sidebar.error(f"Failed to connect to the database: {e}")
         st.stop()
 
-
+st.sidebar.markdown("---")
 # Sidebar: Schema Configuration (Only for "Product Query Agent" and after Database Connection)
 if image_location == "Product Query Agent":
     st.sidebar.header("SCHEMA CONFIGURATION")
@@ -477,7 +499,7 @@ if image_location == "Product Query Agent":
         # Primary Table Selection
 
         primary_table = col1.selectbox(
-            "Select Primary Table for product information",
+            "Primary Table for product information",
             options=table_names,
             key="primary_table_selection",
         )
@@ -490,10 +512,24 @@ if image_location == "Product Query Agent":
             primary_table_columns = st.session_state["table_columns"][primary_table]
             if primary_table_columns:
                 product_name_col = col2.selectbox(
-                    "Select Product Name Column",
+                    "Product Title Column",
                     options=primary_table_columns,
                     key="product_name_col",
                 )
+                if "search_columns" not in st.session_state:
+                    st.session_state["search_columns"] = []
+                if st.sidebar.button("Add Search Field from Primary Table"):
+                    st.session_state["search_columns"].append(None)
+                remaining_columns = [
+                    col for col in primary_table_columns if col != product_name_col
+                ]
+                for i in range(len(st.session_state["search_columns"])):
+                    search_col = st.sidebar.selectbox(
+                        f"Select Search Field #{i+1}",
+                        options=remaining_columns,
+                        key=f"search_col_{i}",
+                    )
+                    st.session_state["search_columns"][i] = search_col
             else:
                 st.sidebar.warning("No columns found for the selected primary table.")
                 st.stop()
@@ -501,8 +537,13 @@ if image_location == "Product Query Agent":
             st.sidebar.warning("No columns found for the selected primary table.")
             st.stop()
 
+        st.sidebar.markdown("---")
+
         # Secondary Table Selection (excluding the primary table)
         st.sidebar.subheader("Additional Attribute Configuration:")
+        st.sidebar.markdown(
+            "N.B: Additional attributes are automatically added as search fields."
+        )
         col1, col2 = st.sidebar.columns(2)
         # secondary_tables = [tbl for tbl in table_names if tbl != primary_table] # Exclude for multiple sec tables
         if "secondary_tables" not in st.session_state:
@@ -567,7 +608,7 @@ if image_location == "Product Query Agent":
                 i
             ] = secondary_table_foreign_key_col
 
-            st.markdown("---")
+            st.sidebar.markdown("---")
 
         # # Add button for new secondary table
         # if st.sidebar.button("Add Another Secondary Table"):
