@@ -412,7 +412,7 @@ elif db_type == "MySQL":
     port = st.sidebar.text_input("Port", value="3306", key="port")
     username = st.sidebar.text_input("Username", value="inventory_yobo", key="username")
     password = st.sidebar.text_input(
-        "Password", type="password", value="iz-ENVMm{+#[", key="password"
+        "Password", type="password", value="", key="password"
     )
     database = st.sidebar.text_input(
         "Database Name", value="inventory_yobo", key="database"
