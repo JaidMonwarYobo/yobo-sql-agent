@@ -8,11 +8,14 @@ from contextlib import contextmanager
 from io import BytesIO
 
 import openai
+import pandas as pd
 import pymysql
 import requests
 import streamlit as st
 from dotenv import load_dotenv
 from langchain.agents.agent_toolkits import create_retriever_tool
+from langchain.agents.agent_types import AgentType
+from langchain.chains import LLMChain
 from langchain.schema import HumanMessage, SystemMessage
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.utilities import SQLDatabase
@@ -24,6 +27,10 @@ from langchain_core.prompts import (
     MessagesPlaceholder,
     PromptTemplate,
     SystemMessagePromptTemplate,
+)
+from langchain_experimental.agents.agent_toolkits import (
+    create_csv_agent,
+    create_pandas_dataframe_agent,
 )
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from PIL import Image
@@ -226,7 +233,7 @@ def display_image(url):
         return False
 
 
-def response_after_executing_sql_query(product_name):
+def response_after_executing_sql_query(product_name, keywords):
     db = st.session_state["db"]
     engine = db._engine  # Get the SQLAlchemy engine from the SQLDatabase object
     config = st.session_state["table_config"]
@@ -269,35 +276,50 @@ def response_after_executing_sql_query(product_name):
         for i in range(len(config["secondary_tables"])):
             base_query += f" LEFT JOIN {config['secondary_tables'][i]} ON {config['primary_table']}.{config['primary_foreign_keys'][i]} = {config['secondary_tables'][i]}.{config['secondary_foreign_keys'][i]}"
 
-        # Add WHERE clause based on user input
-        # where_clause = f" WHERE LOWER({config['primary_table']}.{config['product_name_col']}) LIKE LOWER('%{product_name}%')"
-        where_conditions = [
-            f"LOWER({config['primary_table']}.{config['product_name_col']}) LIKE LOWER('%{product_name}%')"
-        ]
+        # Initialize where_conditions list
+        where_conditions = []
+        params = {}
+        param_counter = 0  # Counter for unique parameter names
+
+        # Add conditions for primary table's product_name_col
+        for keyword in keywords:
+            param_name = f"kw{param_counter}"
+            where_conditions.append(
+                f"LOWER({config['primary_table']}.{config['product_name_col']}) LIKE LOWER(:{param_name})"
+            )
+            params[param_name] = f"%{keyword}%"
+            param_counter += 1
 
         # Add conditions for each search column
         if "search_columns" in st.session_state:
             for search_col in st.session_state["search_columns"]:
                 if search_col:  # Only add condition if search_col is not None
-                    where_conditions.append(
-                        f"LOWER({config['primary_table']}.{search_col}) LIKE LOWER('%{product_name}%')"
-                    )
+                    for keyword in keywords:
+                        param_name = f"kw{param_counter}"
+                        where_conditions.append(
+                            f"LOWER({config['primary_table']}.{search_col}) LIKE LOWER(:{param_name})"
+                        )
+                        params[param_name] = f"%{keyword}%"
+                        param_counter += 1
 
         # Add conditions for each additional column
         for i, additional_col in enumerate(config["additional_info_columns"]):
-            where_conditions.append(
-                f"LOWER({config['secondary_tables'][i]}.{additional_col}) LIKE LOWER('%{product_name}%')"
-            )
+            for keyword in keywords:
+                param_name = f"kw{param_counter}"
+                where_conditions.append(
+                    f"LOWER({config['secondary_tables'][i]}.{additional_col}) LIKE LOWER(:{param_name})"
+                )
+                params[param_name] = f"%{keyword}%"
+                param_counter += 1
+
         # Combine conditions with OR
         where_clause = " WHERE " + " OR ".join(where_conditions)
 
+        # Complete the query string
         query_str = base_query + where_clause
 
     # Define the SQL query with parameter substitution
     query = text(query_str)
-
-    # Prepare the parameter with wildcards
-    params = {"product_name": f"%{product_name}%"}
 
     # Execute the query
     with engine.connect() as connection:
@@ -721,6 +743,9 @@ if "conversation_history" not in st.session_state:
 if "final_output" not in st.session_state:
     st.session_state.final_output = None
 
+if "product_df_results" not in st.session_state:
+    st.session_state.product_df_results = None
+
 # Sidebar Information
 st.sidebar.header("Database Information")
 st.sidebar.write(f"**Dialect:** {db_dialect}")
@@ -751,6 +776,64 @@ Provide only 'yes' or 'no' as your response.
     )
     assistant_reply = deciding_agent(messages).content.strip()
     return assistant_reply
+
+
+def extract_keywords(user_input):
+    # start_time = time.time()
+    # Define a prompt template that instructs the LLM to extract keywords
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template=(
+            "Extract the product-related keywords from the following text. "
+            "Output the keywords as a comma-separated list:\n\n"
+            "{text}\n\nKeywords:"
+        ),
+    )
+    # Initialize the ChatOpenAI model with a low temperature for deterministic output
+    # llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")
+    llm = ChatOpenAI(temperature=0, model="gpt-4o-mini")
+    # Create an LLMChain with the prompt and the model
+    chain = LLMChain(llm=llm, prompt=prompt)
+    # Run the chain to get the keywords
+    keywords_text = chain.run(user_input)
+    # Split the output into a list of keywords
+    keywords_list = [keyword.strip() for keyword in keywords_text.split(",")]
+
+    # end_time = time.time()  # Record the end time
+    # elapsed_time = end_time - start_time  # Calculate the elapsed time
+    # print(f"Time taken: {elapsed_time:.2f} seconds")
+    return keywords_list
+
+
+# def final_agent_response(product_df_results, user_input):
+#     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=openai_api_key)
+
+#     agent = create_csv_agent(
+#         llm,
+#         product_df_results,
+#         verbose=True,
+#         # agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+#         agent_type=AgentType.OPENAI_FUNCTIONS,
+#         handle_parsing_errors=True,
+#         allow_dangerous_code=True,
+#     )
+
+#     return agent.run(user_input)
+
+
+def final_agent_response(product_df_results, user_input):
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=openai_api_key)
+
+    agent = create_pandas_dataframe_agent(
+        llm,
+        product_df_results,
+        verbose=True,
+        agent_type=AgentType.OPENAI_FUNCTIONS,
+        handle_parsing_errors=True,
+        allow_dangerous_code=True,  # Remove this parameter
+    )
+
+    return agent.run(user_input)
 
 
 if st.button("Submit"):
@@ -848,13 +931,35 @@ if st.button("Submit"):
                         else:
                             output = str(response)
 
+                        keywords = extract_keywords(user_input)
+                        # Display the keywords (DEBUG STATEMENT)
+                        print("Keywords:", keywords)
+
                         # Display only the name
-                        final_output = response_after_executing_sql_query(output)
+                        final_output = response_after_executing_sql_query(
+                            output, keywords
+                        )
                         st.session_state.final_output = (
                             final_output  # Save the final output in session state
                         )
+
                         st.write(f"Retrieved Name: {output}")
-                        natural_output = humanise_response(final_output, user_input)
+
+                        if final_output:
+                            # Convert the list of dictionaries to a Pandas DataFrame
+                            product_df_results = pd.DataFrame(final_output)
+                            st.session_state.product_df_results = product_df_results
+
+                            # Display the DataFrame in Streamlit
+                            st.dataframe(product_df_results)
+                        else:
+                            st.write("No results found for the given keywords.")
+
+                        # natural_output = humanise_response(top_10_rows, user_input)
+                        # natural_output = ""
+                        natural_output = final_agent_response(
+                            st.session_state.product_df_results, user_input
+                        )
 
                         # Display the query results
                         if natural_output:
@@ -902,10 +1007,22 @@ if st.button("Submit"):
                         print("Chat state:", chat_state)
                     elif new_product_decider.lower() == "no":
                         final_output = st.session_state.final_output
-                        natural_output = humanise_product_response_with_context(
-                            final_output,
-                            user_input,
-                            st.session_state.conversation_history,
+
+                        if final_output:
+
+                            # Display the DataFrame in Streamlit
+                            st.dataframe(st.session_state.product_df_results)
+                        else:
+                            st.write("No results found for the given keywords.")
+
+                        # natural_output = humanise_product_response_with_context(
+                        #     final_output,
+                        #     user_input,
+                        #     st.session_state.conversation_history,
+                        # )
+
+                        natural_output = final_agent_response(
+                            st.session_state.product_df_results, user_input
                         )
 
                         st.write(f"Yobo's Response: {natural_output}")

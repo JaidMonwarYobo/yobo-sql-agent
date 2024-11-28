@@ -9,3 +9,8 @@ Pillow
 requests
 psycopg2-binary
 streamlit-chat
+cryptography
+matplotlib
+langchain-experimental
+tabulate
+boto3
