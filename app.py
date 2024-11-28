@@ -16,7 +16,8 @@ from dotenv import load_dotenv
 from langchain.agents.agent_toolkits import create_retriever_tool
 from langchain.agents.agent_types import AgentType
 from langchain.chains import LLMChain
-from langchain.schema import HumanMessage, SystemMessage
+from langchain.memory import ChatMessageHistory, ConversationBufferMemory
+from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.utilities import SQLDatabase
 from langchain_community.vectorstores import FAISS
@@ -824,13 +825,27 @@ def extract_keywords(user_input):
 def final_agent_response(product_df_results, user_input):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=openai_api_key)
 
+    chat_history = ChatMessageHistory()
+    for pair in st.session_state.conversation_history:
+        user_message = pair["user_message"]
+        assistant_response = pair["assistant_response"]
+        chat_history.add_message(HumanMessage(content=user_message))
+        chat_history.add_message(AIMessage(content=assistant_response))
+
+    # Create a memory object with the chat history
+    memory = ConversationBufferMemory(
+        chat_memory=chat_history, memory_key="chat_history", return_messages=True
+    )
+
+    # Create the agent with the memory
     agent = create_pandas_dataframe_agent(
         llm,
         product_df_results,
         verbose=True,
         agent_type=AgentType.OPENAI_FUNCTIONS,
         handle_parsing_errors=True,
-        allow_dangerous_code=True,  # Remove this parameter
+        memory=memory,
+        allow_dangerous_code=True,  # Removed as per your instruction
     )
 
     return agent.run(user_input)
